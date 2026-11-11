@@ -357,8 +357,8 @@ export const layersJson: LayersJsonType = {
           showVerticalSlices: true,
           latIsAscending: true
         }
-      },
-    },
+      }
+    }
   },
   '3D Cube Velocity Visualisation': {
     layerNames: {
@@ -411,6 +411,51 @@ export const layersJson: LayersJsonType = {
             minVisibleRatio: 0.6,
             useViewerBounds: false,
             dynamic: true
+          }
+        }
+      },
+      test_edh: {
+        dataType: 'zarr-cube-velocity',
+        dataDescription: ['EDH', 'm/s'],
+        tags: ['V2', 'epsg:4326'],
+        content: 'Just testing EDH dataset with no elevation',
+        params: {
+          urls: {
+            u: 'https://api.earthdatahub.destine.eu/climate-dt-2/IFS-NEMO-SSP3-7.0-sfc-hourly-standard-v0.zarr',
+            v: 'https://api.earthdatahub.destine.eu/climate-dt-2/IFS-NEMO-SSP3-7.0-sfc-hourly-standard-v0.zarr'
+          },
+          variables: { u: 'u10', v: 'v10' },
+          // bounds: { west: -50, south: -20, east: 10, north: 20 },
+          // flipElevation: true,
+          zarrVersion: 3,
+          // latIsAscending: false,
+          selectors: {
+            time: {
+              selected: 0,
+              type: 'index'
+            }
+            // elevation: {
+            //   selected: [0, 22]
+            // }
+          },
+          colormap: 'jet',
+          scale: [0, 2.6],
+          verticalExaggeration: 4500,
+          sliceSpacing: undefined,
+          elevationMode: undefined,
+          dimensionNames: undefined,
+          opacity: undefined,
+          crs: undefined,
+          windOptions: {
+            speedFactor: 0.6,
+            lineLength: { min: 0, max: 400 },
+            particlesTextureSize: 80
+          },
+          requestOverrides: {
+            headers: {
+              Authorization: `Bearer ${import.meta.env.VITE_EDH_TOKEN}`
+            },
+            mode: 'cors'
           }
         }
       },
@@ -604,7 +649,7 @@ export const layersJson: LayersJsonType = {
             dynamic: true
           }
         }
-      },
+      }
     }
   }
 };
