@@ -57,7 +57,7 @@ The toolkit provides **three Cesium provider classes**, each specialized for a d
 | -------------------------- | -------------------- | ----------------------------------------------------------------------------------------- |
 | `ZarrLayerProvider`        | 2D scalar fields     | Renders single-level variables as Cesium imagery layers (e.g., temperature, chlorophyll). |
 | `ZarrCubeProvider`         | 3D volumetric fields | Renders volumetric cubes with horizontal and vertical slices (e.g., ocean temperature).   |
-| `ZarrCubeVelocityProvider` | 3D vector fields     | Visualizes vector flow (u/v components) using animated particle advection.                |
+| `ZarrCubeVelocityProvider` | 2D/3D vector fields  | Visualizes vector flow (u/v components) using animated particle advection.                |
 
 The 2D data pipeline is shared with OpenLayers and Leaflet through
 `zarr-maps-tiling`. Palette definitions and color-ramp helpers are provided by
@@ -189,7 +189,9 @@ For more details, see the [Zarr-Cesium documentation](https://noc-oi.github.io/z
 
 ### 3. `ZarrCubeVelocityProvider`
 
-Renders **3D velocity fields** from U/V components as animated **wind/current layers** using [`cube-cesium-wind-layer`](https://www.npmjs.com/package/cube-cesium-wind-layer), the NOC-OI fork of the original [`cesium-wind-layer`](https://github.com/hongfaqiu/cesium-wind-layer).
+Renders **2D and 3D velocity fields** from U/V components as animated **wind/current layers** using [`cube-cesium-wind-layer`](https://www.npmjs.com/package/cube-cesium-wind-layer), the NOC-OI fork of the original [`cesium-wind-layer`](https://github.com/hongfaqiu/cesium-wind-layer).
+
+The vertical dimension is detected automatically. Datasets without one (for example 10 m wind components) render as a single surface particle layer whose altitude is set through `windOptions.particleHeight`, while datasets with an elevation/depth dimension render as an elevation-major cube.
 
 Zarr-Cesium installs the NOC-OI fork from npm as `cube-cesium-wind-layer`. The fork adds cube-aware rendering and `minVisibleRatio` to bound camera-driven particle width, trail-length, and speed scaling. It also restores the full data bounds and overview particle styling when zooming back out, avoiding particles remaining at the previous regional-view scale. The original project remains credited in the fork package and documentation.
 

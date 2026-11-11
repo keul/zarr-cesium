@@ -55,7 +55,7 @@ If your need is:
 
 - 2D rendering → use [**ZarrLayerProvider**](./zarr-layer-provider.md)
 - 3D + time → Use `ZarrCubeProvider` and drive time externally
-- 3D vector fields → use [**ZarrCubeVelocityProvider**](./zarr-cube-velocity-provider.md)
+- 2D/3D vector fields → use [**ZarrCubeVelocityProvider**](./zarr-cube-velocity-provider.md)
 
 ---
 

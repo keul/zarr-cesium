@@ -1,7 +1,12 @@
 import { cubePointIndices, longitudeInBounds, validateCubeBounds } from './cube-coordinates';
 import { ZarrCubeDataProvider } from './zarr-cube-data-provider';
 import { type Viewer, Math } from 'cesium';
-import { WindLayer, type WindLayerOptions } from 'cube-cesium-wind-layer';
+import {
+  WindLayer,
+  type WindCubeData,
+  type WindData,
+  type WindLayerOptions
+} from 'cube-cesium-wind-layer';
 import * as zarr from 'zarrita';
 import {
   calculateNearestIndex,
@@ -42,10 +47,7 @@ import type {
 import { colormapBuilder } from 'zarr-maps-colormap';
 
 import ndarray from 'ndarray';
-import {
-  DEFAULT_VERTICAL_EXAGGERATION,
-  DEFAULT_WIND_OPTIONS
-} from './cesium-utils';
+import { DEFAULT_VERTICAL_EXAGGERATION, DEFAULT_WIND_OPTIONS } from './cesium-utils';
 import { DEFAULT_COLORMAP } from 'zarr-maps-tiling';
 import type { RequestOverrides } from 'zarr-maps-tiling';
 
@@ -58,15 +60,19 @@ export interface VelocityQueryResult extends QueryResult {
 }
 
 /**
- * Provider responsible for loading and rendering 3D velocity fields (U and V components)
- * from Zarr datasets as animated Cesium `WindLayer`s.
+ * Provider responsible for loading and rendering 2D and 3D velocity fields
+ * (U and V components) from Zarr datasets as animated Cesium `WindLayer`s.
  *
  * @remarks
  * This provider uses `cube-cesium-wind-layer`, the NOC-OI fork of
  * `cesium-wind-layer`. The fork adds
  * cube-aware rendering, bounded camera-driven particle scaling through
- * `minVisibleRatio`, and restores overview styling after zooming back out. The
- * provider passes one elevation-major U/V cube to a single animated layer.
+ * `minVisibleRatio`, and restores overview styling after zooming back out.
+ *
+ * When the U/V variables have a vertical dimension, the provider passes one
+ * elevation-major cube to a single animated layer. When they do not (surface
+ * fields such as 10 m wind), it renders a single 2D particle layer whose
+ * altitude is `windOptions.particleHeight`.
  *
  * @example
  * ```ts
@@ -83,14 +89,21 @@ export class ZarrCubeVelocityProvider {
   public dimensionValues: { [key: string]: Float64Array | number[] | string[] } = {};
   /** Coordinate values represented by the currently loaded velocity cube subset. */
   public cubeDimensionValues: { [key: string]: Float64Array | number[] | string[] } = {};
-  /** Cube dimensions: [longitude, latitude, elevation]. */
+  /** Cube dimensions: [longitude, latitude, elevation] (`1` for 2D data). */
   public cubeDimensions: [number, number, number] | null = null;
   /** Unique identifier for the cube provider instance. */
   public id: string = '';
   /** User-defined selectors for slicing dimensions. */
   public selectors: { [key: string]: ZarrSelectorsProps };
-  /** Shape (size) of the elevation dimension. */
+  /** Shape (size) of the elevation dimension. Always `1` for 2D datasets. */
   public elevationShape: number = 0;
+  /**
+   * Whether the loaded U/V variables have a vertical dimension.
+   *
+   * @remarks When `false`, the provider renders a single surface wind layer
+   * whose altitude is controlled by `windOptions.particleHeight`.
+   */
+  public hasElevation: boolean = false;
   /** Information about multiscale levels in the Zarr dataset. */
   public levelInfos: string[] = [];
   /** Current multiscale level to load. */
@@ -142,14 +155,19 @@ export class ZarrCubeVelocityProvider {
   private windOptions: Partial<WindLayerOptions>;
   private zarrArrays: Partial<Record<'u' | 'v', zarr.Array<any>>> = {};
   private validityData: Partial<Record<'u' | 'v', Uint8Array>> = {};
-  private componentMetadata: Partial<Record<'u' | 'v', {
-    scaleFactor: number;
-    addOffset: number;
-    fillValue?: number;
-    useFillValue: boolean;
-    noDataMin: number;
-    noDataMax: number;
-  }>> = {};
+  private componentMetadata: Partial<
+    Record<
+      'u' | 'v',
+      {
+        scaleFactor: number;
+        addOffset: number;
+        fillValue?: number;
+        useFillValue: boolean;
+        noDataMin: number;
+        noDataMax: number;
+      }
+    >
+  > = {};
   private noDataMin?: number;
   private noDataMax?: number;
   private dimIndices: DimIndicesProps = {};
@@ -203,7 +221,6 @@ export class ZarrCubeVelocityProvider {
     this.colorScale = { min, max, colors };
     this.flipElevation = options.flipElevation ?? false;
     const initialWindOptions = { ...(options.windOptions ?? {}) } as Partial<WindLayerOptions>;
-    delete initialWindOptions.particleHeight;
     this.windOptions = {
       ...DEFAULT_WIND_OPTIONS,
       ...initialWindOptions
@@ -254,7 +271,7 @@ export class ZarrCubeVelocityProvider {
       finestLevelAttrs,
       multiscaleLevel,
       zarrVersion
-    } = await initZarrDataset(
+    } = (await initZarrDataset(
       store,
       root,
       variable,
@@ -264,7 +281,7 @@ export class ZarrCubeVelocityProvider {
       this.zarrVersion,
       this.initialMultiscaleLevel,
       this.multiscaleFormat
-    ) as Awaited<ReturnType<typeof initZarrDataset>> & {
+    )) as Awaited<ReturnType<typeof initZarrDataset>> & {
       finestLevelAttrs: Record<string, unknown>;
       zarrVersion: 2 | 3;
     };
@@ -273,7 +290,9 @@ export class ZarrCubeVelocityProvider {
     this.zarrVersion = zarrVersion;
     this.levelInfos = levelInfos;
 
-    const detectedCrs = this.crs || (this.projectionDefinition ? 'CUSTOM:SOURCE' : null) ||
+    const detectedCrs =
+      this.crs ||
+      (this.projectionDefinition ? 'CUSTOM:SOURCE' : null) ||
       (await detectCRS(attrs, zarrArray));
     const projection = resolveCRS(detectedCrs, this.projectionDefinition, attrs, zarrArray.attrs);
     if (this.projection && this.projection.code !== projection.code) {
@@ -290,11 +309,6 @@ export class ZarrCubeVelocityProvider {
     );
     this.componentMetadata[component] = metadata;
     if (component === 'u') this.dimIndices = dimIndices;
-
-    if (!dimIndices.elevation) {
-      console.warn('No elevation dimension found in Zarr array.');
-      return null;
-    }
 
     const levelInfo = this.levelInfos.length > 0 ? this.levelInfos[this.multiscaleLevel] : null;
     const cube = await new ZarrCubeDataProvider({
@@ -316,14 +330,16 @@ export class ZarrCubeVelocityProvider {
     this.latIsAscending = cube.coordinates.latIsAscending;
     if (component === 'u') this.cubeDimensionValues = cube.cubeDimensionValues;
     if (component === 'u') this.selectors = cube.selectors;
-    this.elevationShape = zarrArray.shape[dimIndices.elevation.index];
+    this.elevationShape = dimIndices.elevation ? zarrArray.shape[dimIndices.elevation.index] : 1;
     if (component === 'u') {
       this.loadedOrigin = cube.origin;
+      this.hasElevation = cube.hasElevation;
     }
 
     const spatialOrder = Object.entries(dimIndices)
       .filter(([name]) => ['lon', 'lat', 'elevation'].includes(name))
-      .sort((a, b) => a[1].index - b[1].index).map(([name]) => name);
+      .sort((a, b) => a[1].index - b[1].index)
+      .map(([name]) => name);
     const arr = new Float32Array(cube.data.data.length);
     let outputIndex = 0;
     for (let elevation = 0; elevation < cube.dimensions[2]; elevation++) {
@@ -332,9 +348,11 @@ export class ZarrCubeVelocityProvider {
           const position: Record<string, number> = { lon, lat, elevation };
           const rawValue = Number(cube.data.get(...spatialOrder.map(name => position[name])));
           const value = rawValue * metadata.scaleFactor + metadata.addOffset;
-          const valid = Number.isFinite(value) &&
+          const valid =
+            Number.isFinite(value) &&
             (!metadata.useFillValue || rawValue !== metadata.fillValue) &&
-            value >= metadata.noDataMin && value <= metadata.noDataMax;
+            value >= metadata.noDataMin &&
+            value <= metadata.noDataMax;
           arr[outputIndex++] = valid ? value : Number.NaN;
         }
       }
@@ -355,9 +373,10 @@ export class ZarrCubeVelocityProvider {
    * Loads both U and V components of the velocity field from their respective Zarr datasets.
    *
    * @returns A promise resolved after both components, coordinates, selected
-   * subsets, and all elevation wind layers have loaded.
+   * subsets, and the wind layer have loaded.
    * @throws When either custom or URL-backed store, selected array, dimensions, or data chunks cannot be read.
-   * @remarks U and V must describe compatible grids.
+   * @remarks U and V must describe compatible grids. A missing elevation
+   * dimension is supported and produces a single surface wind layer.
    */
   async load(): Promise<void> {
     const loadGeneration = ++this.loadGeneration;
@@ -373,29 +392,39 @@ export class ZarrCubeVelocityProvider {
       console.error('Failed to load U or V component data.');
       return;
     }
-    const mismatchedAxis = (['lon', 'lat', 'elevation'] as const).find(axis => {
-      const uValues = Array.from<number | string>(
-        uCube.dimensionValues[axis] as ArrayLike<number | string>
+    const uHasElevation = Boolean(uCube.dimensionValues.elevation);
+    const vHasElevation = Boolean(vCube.dimensionValues.elevation);
+    if (uHasElevation !== vHasElevation) {
+      throw new Error('Velocity U and V elevation dimensions must match');
+    }
+    const axes = uHasElevation ? (['lon', 'lat', 'elevation'] as const) : (['lon', 'lat'] as const);
+    const mismatchedAxis = axes.find(axis => {
+      const uValues = uCube.dimensionValues[axis];
+      const vValues = vCube.dimensionValues[axis];
+      if (!uValues || !vValues) return true;
+      const uCoordinates = Array.from<number | string>(uValues);
+      const vCoordinates = Array.from<number | string>(vValues);
+      return (
+        uCoordinates.length !== vCoordinates.length ||
+        uCoordinates.some((value, index) => {
+          const other = vCoordinates[index];
+          const numericValue = Number(value);
+          const numericOther = Number(other);
+          if (Number.isFinite(numericValue) && Number.isFinite(numericOther)) {
+            const tolerance =
+              1e-9 *
+              globalThis.Math.max(
+                1,
+                globalThis.Math.abs(numericValue),
+                globalThis.Math.abs(numericOther)
+              );
+            return globalThis.Math.abs(numericValue - numericOther) > tolerance;
+          }
+          // CF time coordinates may be decoded to ISO labels. They are valid as
+          // elevation selectors, but particle placement uses their array index.
+          return axis !== 'elevation' || String(value) !== String(other);
+        })
       );
-      const vValues = Array.from<number | string>(
-        vCube.dimensionValues[axis] as ArrayLike<number | string>
-      );
-      return uValues.length !== vValues.length || uValues.some((value, index) => {
-        const other = vValues[index];
-        const numericValue = Number(value);
-        const numericOther = Number(other);
-        if (Number.isFinite(numericValue) && Number.isFinite(numericOther)) {
-          const tolerance = 1e-9 * globalThis.Math.max(
-            1,
-            globalThis.Math.abs(numericValue),
-            globalThis.Math.abs(numericOther)
-          );
-          return globalThis.Math.abs(numericValue - numericOther) > tolerance;
-        }
-        // CF time coordinates may be decoded to ISO labels. They are valid as
-        // elevation selectors, but particle placement uses their array index.
-        return axis !== 'elevation' || String(value) !== String(other);
-      });
     });
     if (mismatchedAxis) {
       throw new Error(`Velocity U and V ${mismatchedAxis} coordinate grids must match`);
@@ -455,13 +484,16 @@ export class ZarrCubeVelocityProvider {
 
     const interval = (values: number[], target: number): [number, number, number] | null => {
       const ascending = values[values.length - 1] >= values[0];
-      if (target < globalThis.Math.min(values[0], values[values.length - 1]) ||
-          target > globalThis.Math.max(values[0], values[values.length - 1])) return null;
+      if (
+        target < globalThis.Math.min(values[0], values[values.length - 1]) ||
+        target > globalThis.Math.max(values[0], values[values.length - 1])
+      )
+        return null;
       let low = 0;
       let high = values.length - 1;
       while (high - low > 1) {
         const middle = (low + high) >> 1;
-        if ((values[middle] <= target) === ascending) low = middle;
+        if (values[middle] <= target === ascending) low = middle;
         else high = middle;
       }
       const span = values[high] - values[low];
@@ -489,17 +521,20 @@ export class ZarrCubeVelocityProvider {
     };
     const delta = globalThis.Math.max(
       1,
-      1e-6 * globalThis.Math.max(
-        globalThis.Math.abs(sourceX[sourceX.length - 1] - sourceX[0]),
-        globalThis.Math.abs(sourceY[sourceY.length - 1] - sourceY[0])
-      )
+      1e-6 *
+        globalThis.Math.max(
+          globalThis.Math.abs(sourceX[sourceX.length - 1] - sourceX[0]),
+          globalThis.Math.abs(sourceY[sourceY.length - 1] - sourceY[0])
+        )
     );
     for (let row = 0; row < height; row++) {
-      const latitude = this.bounds.south + row / globalThis.Math.max(1, height - 1) *
-        (this.bounds.north - this.bounds.south);
+      const latitude =
+        this.bounds.south +
+        (row / globalThis.Math.max(1, height - 1)) * (this.bounds.north - this.bounds.south);
       for (let column = 0; column < width; column++) {
-        const longitude = this.bounds.west + column / globalThis.Math.max(1, width - 1) *
-          (this.bounds.east - this.bounds.west);
+        const longitude =
+          this.bounds.west +
+          (column / globalThis.Math.max(1, width - 1)) * (this.bounds.east - this.bounds.west);
         const [x, y] = this.projection.forward([longitude, latitude]);
         const xInterval = interval(sourceX, x);
         const yInterval = interval(sourceY, y);
@@ -527,10 +562,18 @@ export class ZarrCubeVelocityProvider {
     }
     const dimensionValues = {
       ...uCube.dimensionValues,
-      lon: Float64Array.from({ length: width }, (_, index) =>
-        this.bounds.west + index / globalThis.Math.max(1, width - 1) * (this.bounds.east - this.bounds.west)),
-      lat: Float64Array.from({ length: height }, (_, index) =>
-        this.bounds.south + index / globalThis.Math.max(1, height - 1) * (this.bounds.north - this.bounds.south))
+      lon: Float64Array.from(
+        { length: width },
+        (_, index) =>
+          this.bounds.west +
+          (index / globalThis.Math.max(1, width - 1)) * (this.bounds.east - this.bounds.west)
+      ),
+      lat: Float64Array.from(
+        { length: height },
+        (_, index) =>
+          this.bounds.south +
+          (index / globalThis.Math.max(1, height - 1)) * (this.bounds.north - this.bounds.south)
+      )
     };
     this.validityData.u = targetUValid;
     this.validityData.v = targetVValid;
@@ -564,31 +607,38 @@ export class ZarrCubeVelocityProvider {
     const renderedValidity = this.flipElevation
       ? this.reverseElevationLevels(validity, width * height, elevation)
       : validity;
-    const sourceElevations = Array.from<number | string>(
-      dimensionValues.elevation as ArrayLike<number | string>
-    );
-    const elevations = sourceElevations.map((value, index) => {
-      const numericValue = Number(value);
-      return Number.isFinite(numericValue) ? numericValue : index;
-    });
-    const windData = {
+    const surfaceData: WindData = {
       u: { array: renderedU, min: -0.5, max: 0.5 },
       v: { array: renderedV, min: -0.5, max: 0.5 },
       validity: renderedValidity,
       width,
       height,
-      depth: elevation,
-      elevations,
       latIsAscending: this.projection?.geographic ? this.latIsAscending : true,
-      elevationIsAscending:
-        elevations.length < 2 || elevations[0] < elevations[elevations.length - 1],
       bounds: this.bounds
     };
+    let windData: WindData | WindCubeData = surfaceData;
+    if (this.hasElevation) {
+      const sourceElevations = Array.from<number | string>(
+        dimensionValues.elevation as ArrayLike<number | string>
+      );
+      const elevations = sourceElevations.map((value, index) => {
+        const numericValue = Number(value);
+        return Number.isFinite(numericValue) ? numericValue : index;
+      });
+      windData = {
+        ...surfaceData,
+        depth: elevation,
+        elevations,
+        elevationIsAscending:
+          elevations.length < 2 || elevations[0] < elevations[elevations.length - 1]
+      };
+    }
     const layerOptions = {
       ...this.windOptions,
       flipY: undefined,
-      verticalExaggeration: this.verticalExaggeration,
-      elevationMode: this.elevationMode,
+      // Surface data is a single layer whose altitude is `particleHeight`.
+      verticalExaggeration: this.hasElevation ? this.verticalExaggeration : 1,
+      elevationMode: this.hasElevation ? this.elevationMode : ('height' as const),
       elevationStep: this.sliceSpacing
     };
 
@@ -622,12 +672,16 @@ export class ZarrCubeVelocityProvider {
     sliceSize: number,
     elevationCount: number
   ): Float32Array | Uint8Array {
-    const reversed = values instanceof Uint8Array
-      ? new Uint8Array(values.length)
-      : new Float32Array(values.length);
+    const reversed =
+      values instanceof Uint8Array
+        ? new Uint8Array(values.length)
+        : new Float32Array(values.length);
     for (let elevationIndex = 0; elevationIndex < elevationCount; elevationIndex++) {
       const sourceOffset = (elevationCount - 1 - elevationIndex) * sliceSize;
-      reversed.set(values.subarray(sourceOffset, sourceOffset + sliceSize), elevationIndex * sliceSize);
+      reversed.set(
+        values.subarray(sourceOffset, sourceOffset + sliceSize),
+        elevationIndex * sliceSize
+      );
     }
     return reversed;
   }
@@ -691,20 +745,23 @@ export class ZarrCubeVelocityProvider {
       this.throwIfQueryAborted(options.signal);
       if (!this.hasValidCurrentAt(longitude, latitude, elevationIndex)) continue;
       if (!this.layer || elevationIndex % this.sliceSpacing !== 0) continue;
-      const renderedElevationIndex = this.flipElevation
-        ? this.cubeDimensionValues.elevation.length - 1 - elevationIndex
-        : elevationIndex;
+      const renderedElevationIndex =
+        this.hasElevation && this.flipElevation
+          ? this.cubeDimensionValues.elevation.length - 1 - elevationIndex
+          : elevationIndex;
       const current = this.layer.getDataAtLonLat(longitude, latitude, renderedElevationIndex);
       if (!current || !Number.isFinite(current.interpolated.speed)) continue;
       values.push(current.interpolated.speed);
       u.push(current.interpolated.u);
       v.push(current.interpolated.v);
-      elevations.push(this.cubeDimensionValues.elevation[elevationIndex]);
+      if (this.hasElevation) {
+        elevations.push(this.cubeDimensionValues.elevation[elevationIndex]);
+      }
     }
 
     const coordinates: QueryResult['coordinates'] = {};
     if (values.length > 0) {
-      coordinates[elevationKey] = elevations;
+      if (this.hasElevation) coordinates[elevationKey] = elevations;
       if (options.includeSpatialCoordinates !== false) {
         coordinates[this.dimIndices.lon?.name ?? 'lon'] = [longitude];
         coordinates[this.dimIndices.lat?.name ?? 'lat'] = [latitude];
@@ -792,7 +849,8 @@ export class ZarrCubeVelocityProvider {
 
   private resolveElevationIndices(selection?: ZarrSelectorsProps): number[] {
     const elevations = this.cubeDimensionValues.elevation;
-    if (!elevations?.length) throw new Error('Velocity elevation coordinates are unavailable');
+    // 2D velocity fields have a single implicit surface level.
+    if (!elevations?.length) return [0];
     if (!selection || !Array.isArray(selection.selected)) return [0];
 
     let start: number;
@@ -823,8 +881,8 @@ export class ZarrCubeVelocityProvider {
     const vArray = this.zarrArrays.v;
     const timeInfo = this.dimIndices.time;
     const elevationInfo = this.dimIndices.elevation;
-    if (!uArray || !vArray || !timeInfo || !elevationInfo) {
-      throw new Error('Velocity Zarr arrays do not have queryable time and elevation dimensions');
+    if (!uArray || !vArray || !timeInfo) {
+      throw new Error('Velocity Zarr arrays do not have queryable time dimensions');
     }
     const timeValues = this.dimensionValues.time;
     const lonValues = this.cubeDimensionValues.lon;
@@ -865,7 +923,7 @@ export class ZarrCubeVelocityProvider {
       selection[this.dimIndices.lon.index] = this.longitudeIndices[localLonIndex];
       selection[this.dimIndices.lat.index] = this.loadedOrigin.y + localLatIndex;
       // Time series are intentionally queried at the first loaded elevation.
-      selection[elevationInfo.index] = this.loadedOrigin.elevation;
+      if (elevationInfo) selection[elevationInfo.index] = this.loadedOrigin.elevation;
       selection[timeInfo.index] = zarr.slice(timeStart, timeEnd);
       for (const [dimension, dimInfo] of Object.entries(this.dimIndices)) {
         if (['lon', 'lat', 'elevation', 'time'].includes(dimension)) continue;
@@ -899,10 +957,11 @@ export class ZarrCubeVelocityProvider {
     const sourceYValues = Array.from(latValues, Number);
     const rotationDelta = globalThis.Math.max(
       1,
-      1e-6 * globalThis.Math.max(
-        globalThis.Math.abs(sourceXValues[sourceXValues.length - 1] - sourceXValues[0]),
-        globalThis.Math.abs(sourceYValues[sourceYValues.length - 1] - sourceYValues[0])
-      )
+      1e-6 *
+        globalThis.Math.max(
+          globalThis.Math.abs(sourceXValues[sourceXValues.length - 1] - sourceXValues[0]),
+          globalThis.Math.abs(sourceYValues[sourceYValues.length - 1] - sourceYValues[0])
+        )
     );
     for (let index = 0; index < sampleCount; index++) {
       const rawU = Number(uData.data[index]);
@@ -911,12 +970,16 @@ export class ZarrCubeVelocityProvider {
       const vMetadata = this.componentMetadata.v!;
       const uValue = rawU * uMetadata.scaleFactor + uMetadata.addOffset;
       const vValue = rawV * vMetadata.scaleFactor + vMetadata.addOffset;
-      const uValid = Number.isFinite(uValue) &&
+      const uValid =
+        Number.isFinite(uValue) &&
         (!uMetadata.useFillValue || rawU !== uMetadata.fillValue) &&
-        uValue >= uMetadata.noDataMin && uValue <= uMetadata.noDataMax;
-      const vValid = Number.isFinite(vValue) &&
+        uValue >= uMetadata.noDataMin &&
+        uValue <= uMetadata.noDataMax;
+      const vValid =
+        Number.isFinite(vValue) &&
         (!vMetadata.useFillValue || rawV !== vMetadata.fillValue) &&
-        vValue >= vMetadata.noDataMin && vValue <= vMetadata.noDataMax;
+        vValue >= vMetadata.noDataMin &&
+        vValue <= vMetadata.noDataMax;
       if (!uValid || !vValid) continue;
       const [east, north] = this.rotateProjectedVector(
         uValue,
@@ -934,9 +997,11 @@ export class ZarrCubeVelocityProvider {
     }
 
     const coordinates: QueryResult['coordinates'] = {
-      [timeInfo.name]: validTimes,
-      [elevationInfo.name]: [this.cubeDimensionValues.elevation[0]]
+      [timeInfo.name]: validTimes
     };
+    if (elevationInfo) {
+      coordinates[elevationInfo.name] = [this.cubeDimensionValues.elevation[0]];
+    }
     if (options.includeSpatialCoordinates !== false && values.length > 0) {
       coordinates[this.dimIndices.lon?.name ?? 'lon'] = [longitude];
       coordinates[this.dimIndices.lat?.name ?? 'lat'] = [latitude];
@@ -1015,7 +1080,7 @@ export class ZarrCubeVelocityProvider {
    * controls whether coordinates are heights or depths.
    * @returns A promise resolved after the cube layer options are updated.
    * @remarks Non-positive spacing/exaggeration and spacing beyond the elevation
-   * dimension are rejected with a warning.
+   * dimension are rejected with a warning. This is a no-op for 2D datasets.
    */
   async updateSlices({
     sliceSpacing,
@@ -1026,7 +1091,7 @@ export class ZarrCubeVelocityProvider {
     verticalExaggeration?: number;
     elevationMode?: ElevationMode;
   }): Promise<void> {
-    if (!this.volumeData || !this.cubeDimensions) return;
+    if (!this.volumeData || !this.cubeDimensions || !this.hasElevation) return;
     let updateLayers = false;
     if (sliceSpacing !== undefined) {
       if (sliceSpacing <= 0) {
@@ -1071,7 +1136,8 @@ export class ZarrCubeVelocityProvider {
    * color scale, or particle simulation parameters.
    *
    * @param options - Partial style update. `windOptions` are forwarded to the
-   * WindLayer except `particleHeight`, which remains derived from Zarr elevation.
+   * WindLayer. For 3D data `particleHeight` is ignored because height comes from
+   * the Zarr elevation coordinates; for 2D data it sets the surface altitude.
    * @remarks The existing layer is updated in place; source data is not reloaded.
    */
   updateStyle({
@@ -1100,9 +1166,13 @@ export class ZarrCubeVelocityProvider {
       this.colorScale.colors = colors;
       this.colormap = colormap;
     }
+    let surfaceHeightChanged = false;
     if (windOptions !== undefined) {
       const updatedWindOptions = { ...windOptions } as Partial<WindLayerOptions>;
-      delete updatedWindOptions.particleHeight;
+      surfaceHeightChanged =
+        !this.hasElevation &&
+        updatedWindOptions.particleHeight !== undefined &&
+        updatedWindOptions.particleHeight !== this.windOptions.particleHeight;
       this.windOptions = {
         ...this.windOptions,
         ...updatedWindOptions
@@ -1113,6 +1183,15 @@ export class ZarrCubeVelocityProvider {
       domain: { min: this.colorScale.min, max: this.colorScale.max },
       colors: this.colorScale.colors as string[]
     };
+    if (surfaceHeightChanged && this.volumeData && this.layer) {
+      // WindLayer caches the surface elevations, so a new particleHeight needs a new layer.
+      this.layer?.destroy();
+      this.layer = null;
+      void this.createWindLayer(this.loadGeneration).catch(error => {
+        console.error('Failed to rebuild the surface wind layer.', error);
+      });
+      return;
+    }
     this.layer?.updateOptions(this.windOptions);
   }
 

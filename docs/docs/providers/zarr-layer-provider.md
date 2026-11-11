@@ -33,7 +33,7 @@ Use **ZarrLayerProvider** when your dataset is:
 If you need:
 
 - 3D rendering → use [**ZarrCubeProvider**](./zarr-cube-provider.md)
-- 3D vector fields → use [**ZarrCubeVelocityProvider**](./zarr-cube-velocity-provider.md)
+- 2D/3D vector fields → use [**ZarrCubeVelocityProvider**](./zarr-cube-velocity-provider.md)
 - 2D tiled imagery using a backend server → use [**titiler**](https://github.com/developmentseed/titiler)
 
 ---

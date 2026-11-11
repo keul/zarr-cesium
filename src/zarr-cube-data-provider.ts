@@ -42,9 +42,19 @@ export interface ZarrCubeData {
   dimensions: [number, number, number];
   origin: { x: number; y: number; elevation: number };
   bounds: BoundsProps;
+  /**
+   * Whether the source variable has a vertical dimension. When false, the
+   * variable is two-dimensional and `dimensions[2]` is a single synthetic level.
+   */
+  hasElevation: boolean;
 }
 
-/** Loads and spatially subsets a three-dimensional Zarr variable without rendering it. */
+/**
+ * Loads and spatially subsets a Zarr variable without rendering it.
+ *
+ * @remarks Variables with a vertical dimension are loaded as cubes. Variables
+ * without one (surface-only 2D fields) are loaded as a single-level cube.
+ */
 export class ZarrCubeDataProvider {
   constructor(private readonly options: ZarrCubeDataOptions) {}
 
@@ -60,32 +70,35 @@ export class ZarrCubeDataProvider {
       projection,
       latIsAscending
     } = this.options;
-    if (!dimensions.elevation) {
-      throw new Error('Zarr cube requires an elevation dimension');
-    }
-
+    const elevationDimension = dimensions.elevation;
     const dimensionValues = await loadAllDimensionValues(root, dimensions, level, zarrVersion);
-    const { dimensionValuesWithElevation, elevationSlice } = await calculateElevationSlice(
-      array.shape[dimensions.elevation.index],
-      dimensions.elevation,
-      selectors.elevation,
-      withDimensionAliases(dimensionValues, dimensions),
-      root,
-      // The level-specific values are already cached above.
-      null,
-      zarrVersion
-    );
+    let dimensionValuesWithElevation = withDimensionAliases(dimensionValues, dimensions);
+    let elevationSlice: [number, number] = [0, 1];
+    if (elevationDimension) {
+      ({ dimensionValuesWithElevation, elevationSlice } = await calculateElevationSlice(
+        array.shape[elevationDimension.index],
+        elevationDimension,
+        selectors.elevation,
+        dimensionValuesWithElevation,
+        root,
+        // The level-specific values are already cached above.
+        null,
+        zarrVersion
+      ));
+    }
     const longitude = Array.from(dimensionValues.lon, Number);
     const latitude = Array.from(dimensionValues.lat, Number);
-    const effectiveBounds = bounds ?? sourceBoundsToGeographic(
-      {
-        xMin: Math.min(...longitude),
-        xMax: Math.max(...longitude),
-        yMin: Math.min(...latitude),
-        yMax: Math.max(...latitude)
-      },
-      projection
-    );
+    const effectiveBounds =
+      bounds ??
+      sourceBoundsToGeographic(
+        {
+          xMin: Math.min(...longitude),
+          xMax: Math.max(...longitude),
+          yMin: Math.min(...latitude),
+          yMax: Math.max(...latitude)
+        },
+        projection
+      );
     const coordinates = selectCubeCoordinates(
       longitude,
       latitude,
@@ -134,7 +147,8 @@ export class ZarrCubeDataProvider {
       coordinates,
       dimensions: [coordinates.x.length, endY - startY, elevationSlice[1] - elevationSlice[0]],
       origin: { x: startX, y: startY, elevation: elevationSlice[0] },
-      bounds: effectiveBounds
+      bounds: effectiveBounds,
+      hasElevation: Boolean(elevationDimension)
     };
   }
 }

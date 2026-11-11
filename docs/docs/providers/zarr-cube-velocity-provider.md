@@ -5,7 +5,12 @@ title: ZarrCubeVelocityProvider
 
 # ZarrCubeVelocityProvider
 
-The **ZarrCubeVelocityProvider** loads and visualizes **3D vector fields** (U, V components) from Zarr datasets as animated particle layers in Cesium using `WindLayer` from [`cube-cesium-wind-layer`](https://www.npmjs.com/package/cube-cesium-wind-layer), the [NOC-OI fork](https://github.com/NOC-OI/cesium-wind-layer) of the original [`cesium-wind-layer`](https://github.com/hongfaqiu/cesium-wind-layer).
+The **ZarrCubeVelocityProvider** loads and visualizes **2D and 3D vector fields** (U, V components) from Zarr datasets as animated particle layers in Cesium using `WindLayer` from [`cube-cesium-wind-layer`](https://www.npmjs.com/package/cube-cesium-wind-layer), the [NOC-OI fork](https://github.com/NOC-OI/cesium-wind-layer) of the original [`cesium-wind-layer`](https://github.com/hongfaqiu/cesium-wind-layer).
+
+The vertical dimension is detected automatically. Variables with an elevation/depth
+dimension are rendered as an elevation-major cube. Variables without one (for
+example 10 m wind components) are rendered as a single surface layer whose
+altitude is controlled by `windOptions.particleHeight`.
 
 The NOC-OI fork adds cube-aware particle rendering and `minVisibleRatio`, which clamps camera-driven particle width, trail-length, and speed scaling (`0.6` by default, or `1` to retain the overview scale at every zoom). It also resets visible longitude/latitude ranges and pixel scale when zooming back to a globe overview.
 
@@ -21,6 +26,7 @@ It supports:
 - Zarr v2 and v3
 - Multiscale pyramids
 - Legacy ndpyramid and GeoZarr multiscale layouts
+- 2D surface fields and 3D velocity volumes
 - GPU-accelerated particle animations
 - Dynamic elevation slicing
 - CF-compliant time decoding for selectors
@@ -33,7 +39,8 @@ It supports:
 Use this provider when you have:
 
 - **Vector fields** stored in Zarr
-- **3D volumes** representing velocity over depth or height
+- **3D volumes** representing velocity over depth or height, or **2D surface
+  grids** with no vertical dimension
 - Two variables: **u** (zonal) and **v** (meridional)
 - Desire to visualize with animated particles
 
@@ -48,7 +55,7 @@ If you want:
 
 - 2D rendering → use [**ZarrLayerProvider**](./zarr-layer-provider.md)
 - 3D rendering → use [**ZarrCubeProvider**](./zarr-cube-provider.md)
-- 3D vector fields + time → use [**ZarrCubeVelocityProvider**](./zarr-cube-velocity-provider.md) and drive time externally
+- 2D/3D vector fields + time → use [**ZarrCubeVelocityProvider**](./zarr-cube-velocity-provider.md) and drive time externally
 
 ---
 
@@ -74,7 +81,9 @@ await windCube.load();
 ```
 
 This creates one cube-aware animated particle layer. The layer receives the complete U/V cube and
-distributes particles across the selected elevation levels.
+distributes particles across the selected elevation levels. When the U/V variables
+have no elevation dimension, the provider creates a single surface particle
+layer at `windOptions.particleHeight` (1000 m by default).
 
 ---
 
@@ -100,7 +109,7 @@ interface VelocityOptions {
   scale?: [number, number]; // Min/max for color scaling
   noDataMin?: number; // Shared minimum valid decoded U/V component value
   noDataMax?: number; // Shared maximum valid decoded U/V component value
-  windOptions?: Partial<WindLayerOptions>; // Additional WindLayer configuration
+  windOptions?: Partial<WindLayerOptions>; // Additional WindLayer configuration; particleHeight sets 2D surface altitude
   crs?: CRS; // Force CRS (auto-detected if not set)
   proj4?: string | Record<string, unknown>; // Definition shared by the U/V grids
   multiscaleFormat?: MultiscaleFormat; // 'auto' (default), 'legacy', or 'geozarr'
@@ -182,15 +191,18 @@ This loads:
 - `u` velocity cube
 - `v` velocity cube
 - Multiscale metadata
-- Dimension values (lon, lat, elevation)
+- Dimension values (lon, lat, and elevation when present)
 - Windowed spatial slice (based on bounds)
-- Elevation slice ranges and spacing
+- Elevation slice ranges and spacing (3D only)
 
-Then it creates one cube-aware Cesium `WindLayer` and adds it to the viewer.
+Then it creates one Cesium `WindLayer` and adds it to the viewer. If the
+variables have no elevation dimension, loading succeeds and the provider
+creates a 2D surface layer instead of failing.
 
-Before rendering, the provider verifies that U and V have identical longitude, latitude, and
-elevation coordinate grids. A mismatch is rejected because component values cannot be paired
-reliably. Both components are loaded through the same cube-loading path as `ZarrCubeProvider`.
+Before rendering, the provider verifies that U and V have identical longitude,
+latitude, and elevation coordinate grids. A mismatch is rejected because
+component values cannot be paired reliably. Both components are loaded through
+the same cube-loading path as `ZarrCubeProvider`.
 
 ---
 
@@ -211,9 +223,15 @@ The cube contains:
 
 Particles animate based on u/v speed and direction.
 
+For 2D datasets (`hasElevation === false`) there is no vertical sampling. The
+provider passes a plane `windData` structure without `depth`/`elevations`, and
+`WindLayer` renders the particles at `particleHeight` meters above the ground.
+`verticalExaggeration` is forced to `1` in this mode so `particleHeight` is used
+as an absolute altitude.
+
 ### WindLayer Integration
 
-The layer receives a cube `windData` structure:
+For 3D data the layer receives a cube `windData` structure:
 
 ```ts
 {
@@ -227,6 +245,8 @@ The layer receives a cube `windData` structure:
   bounds: this.bounds
 }
 ```
+
+For 2D data the same structure is sent without `depth` and `elevations`.
 
 Plus user-configurable **particle system settings**:
 
@@ -394,7 +414,8 @@ This:
 - Recomputes heights
 - Applies the new vertical-layout parameters without rereading the cube
 
-All the parameters are optional. If not provided, the current value is retained.
+This method is a no-op for 2D datasets. All the parameters are optional. If not
+provided, the current value is retained.
 Changing `elevationMode` only changes vertical placement. In `height` mode,
 height is `elevation * verticalExaggeration`; in `depth` mode, height is
 `(elevation - maximumElevation) * verticalExaggeration`. U/V values, latitude,
@@ -423,8 +444,10 @@ This applies instantly to the existing layer.
 
 The full list of supported colormaps is available in the [Colormaps section](../api/type-aliases/ColorMapName.md).
 
-`windOptions` allows fine-tuning of particle-system parameters. `particleHeight` is ignored because
-height is derived from the Zarr elevation coordinates. For more information, see the
+`windOptions` allows fine-tuning of particle-system parameters. For 3D data
+`particleHeight` is ignored because height is derived from the Zarr elevation
+coordinates. For 2D data it sets the surface altitude in meters (1000 by
+default); changing it rebuilds the surface layer. For more information, see the
 [`WindLayerOptions` source in the NOC-OI fork](https://github.com/NOC-OI/cesium-wind-layer/tree/main/packages/cesium-wind-layer).
 
 ---
@@ -450,6 +473,10 @@ const series = await windCube.getTimeSeries([-4.2, 50.1]);
 Input positions use WGS84 longitude/latitude. A ranged time selector reads the
 source arrays, while an elevation range returns values across the loaded
 vertical subset. Pass `{ signal }` to cancel a query.
+
+For 2D datasets, point queries and time series return the single surface value.
+`getVerticalProfile` and `streamVerticalProfile` throw because there is no
+elevation dimension to sample.
 
 ---
 

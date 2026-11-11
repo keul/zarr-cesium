@@ -146,7 +146,11 @@ export interface VelocityOptions {
   noDataMax?: number;
   /** Zarr version. Defaults to null and is detected by trying v3 before v2. */
   zarrVersion?: 2 | 3 | null;
-  /** Particle styling; height is derived from the selected Zarr elevation. */
+  /**
+   * Particle styling. For 3D datasets the particle height is derived from the
+   * selected Zarr elevation; for 2D datasets `particleHeight` sets the surface
+   * altitude in meters.
+   */
   windOptions?: VelocityWindOptions;
   multiscaleFormat?: MultiscaleFormat;
   /** Static fetch options shared by URL-backed U and V stores. */
@@ -159,10 +163,7 @@ export interface VelocityOptions {
 
 export type VelocityWindOptions = Omit<
   Partial<WindLayerOptions>,
-  | 'particleHeight'
-  | 'verticalExaggeration'
-  | 'elevationMode'
-  | 'elevationStep'
+  'verticalExaggeration' | 'elevationMode' | 'elevationStep'
 >;
 
 export interface CubeVelocityProps {
